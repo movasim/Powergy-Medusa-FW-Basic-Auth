@@ -36,13 +36,30 @@
   - TX -> RX (NodeMCU depends on PZEM #)
   - VCC -> 5V
 
+  ============================================== 
+  = Sensor DS18B20. Digital Temperature Sensor =
+  ==============================================
+  connections:
+  - VCC -> 3V3
+  - GND -> GND
+  - DATA -> D3
+
+  ==========
+  = RELAY =
+  ==========
+  The Relay is used to connect/disconnect external loads using contactors.
+  It has a red LED to indicate whether the Relay is activated or not.
+  connections:
+  - +5V -> D4
+  - GND -> GND
+
   ==========
   = Jumper =
   ==========
   The Juper (JP1) is used to switch Powergy into Debug/Production mode.
   connections:
-  - D1 -> GND: Debug Mode
-  - D1 -> N/C: Production Mode 
+  - Pin 10 -> GND: Debug Mode
+  - Pin 10 -> N/C: Production Mode 
 
   Debug Mode: Useful information will be published in the Serial Port.
   Production Mode. Few infromation will be published to the Serial Port.
@@ -55,13 +72,15 @@
 #include <PubSubClient.h>           // https://github.com/knolleary/pubsubclient
 #include <ArduinoJson.h>            // https://github.com/bblanchon/ArduinoJson
 #include <PZEM004Tv30.h>            // https://github.com/mandulaj/PZEM-004T-v30
+#include <OneWire.h>                // https://github.com/PaulStoffregen/OneWire
+#include <DallasTemperature.h>      // https://github.com/milesburton/Arduino-Temperature-Control-Library
 #include "mqtt.configuration.h"     // MQTT file configuration.
 
 // ========== Start Device User Parametrization ============================================================================
 
 #define Alias "Distribution Panel";             // Friendly name for the Device location.
-unsigned long mqttSensorsReportPeriod = 10000;  // Sensors Report Period (Miliseconds).
-unsigned int mqttDeviceReportPeriod = 3;        // Device Report Period (times) based on MQTTSensorsReportPeriod.
+unsigned long mqttSensorsReportPeriod = 60000;  // Sensors Report Period (Miliseconds).
+unsigned int mqttDeviceReportPeriod = 30;        // Device Report Period (times) based on MQTTSensorsReportPeriod.
 int resetPortal = 180;                          // Number of seconds until the WiFiManager resests ESP8266.
 #define AP_Password "powergy.movasim"           // AP password.
 #define Phases 1                                // Define the number of PZEM-004T devices installed in the main board [1,3].
@@ -74,13 +93,15 @@ int resetPortal = 180;                          // Number of seconds until the W
 #define FirmwareFlavor "Basic-Auth"
 #define FirmwareVersion "1.0.0"
 #define JUMPER 10
+#define LED D0
 #define PZEM_1_RX D1 
 #define PZEM_1_TX D2
+#define oneWirePin D3
+#define RelayPin D4
 #define PZEM_2_RX D5
 #define PZEM_2_TX D6
 #define PZEM_3_RX D7
 #define PZEM_3_TX D8
-#define LED D0
 
 // ========== End Device Parametrization ===================================================================================
 
@@ -105,13 +126,15 @@ void reconnectMqttBroker(void);
 void messageReceived(char* p_topic, byte* p_payload, unsigned int p_length);
 void publishSensorsData1(float voltage1, float current1, float power1, float energy1, float frequency1, float powerfactor1);
 void publishSensorsData3(float voltage1, float current1, float power1, float energy1, float frequency1, float powerfactor1, float voltage2, float current2, float power2, float energy2, float frequency2, float powerfactor2, float voltage3, float current3, float power3, float energy3, float frequency3, float powerfactor3);
-void publishDeviceData(String dev_t, String dev_m, String dev_v, String fw_f, String fw_v, String mac, String ip, byte s_qty, unsigned long up, String rst_r, unsigned int free_heap, byte heap_frg);
+void publishDeviceData(String dev_t, String dev_m, String dev_v, String fw_f, String fw_v, String mac, String ip, byte s_qty, unsigned long up, String rst_r, unsigned int free_heap, byte heap_frg, bool relay, float t);
 
 // Create  object of the class.
 
 PZEM004Tv30 pzem1(PZEM_1_RX, PZEM_1_TX);  // (RX,TX) connect to TX,RX of PZEM-1
 PZEM004Tv30 pzem2(PZEM_2_RX, PZEM_2_TX);  // (RX,TX) connect to TX,RX of PZEM-2
 PZEM004Tv30 pzem3(PZEM_3_RX, PZEM_3_TX);  // (RX,TX) connect to TX,RX of PZEM-3
+OneWire oneWireBus(oneWirePin);
+DallasTemperature ds18b20(&oneWireBus);
 WiFiClient espClient;
 PubSubClient client(espClient);
 
@@ -119,6 +142,9 @@ void setup() {
 
   Serial.begin(115200); // Initialize serial communications with the PC
   while (!Serial);      // Wait for hardware serial to appear.
+
+  ds18b20.begin(); // Initialize and configure DS18B20.
+  ds18b20.setResolution(12);
 
   // Check JUMPER Status.
   pinMode(JUMPER, INPUT_PULLUP);
@@ -174,8 +200,10 @@ void setup() {
   client.setBufferSize(2048);
   client.setCallback(messageReceived);
 
-  pinMode(LED, OUTPUT);     // Initialize LED pin as output.
-  digitalWrite(LED, HIGH);  // Initialize the LED off by making the voltage HIGH.
+  pinMode(RelayPin, OUTPUT);     // Rele Contactor Bomba Centrifuga
+  digitalWrite(RelayPin, HIGH);   // Inicializamos el Rele de la Bomba Centrifuga como APAGADA.
+  pinMode(LED, OUTPUT);         // Initialize LED pin as output.
+  digitalWrite(LED, LOW);      // Initialize the LED off by making the voltage HIGH.
 
   Serial.println(F("End setup"));
 }
@@ -255,7 +283,7 @@ void loop()
       }
     }
 
-    if (Phases > 1) // Phases could be eiher 1 or 3.
+    if (Phases != 1) // Phases could be eiher 1 or 3.
     {
       // Read PZEM-004T-2
       float voltage2 = pzem2.voltage();
@@ -377,7 +405,6 @@ void loop()
     {
       publishSensorsData1(voltage1, current1, power1, energy1, frequency1, powerfactor1);
     }
-    
   }
 
   if ((counter == mqttDeviceReportPeriod) && (currentTime - previousTime >= (mqttSensorsReportPeriod/2)))
@@ -407,8 +434,11 @@ void loop()
     String deviceResetReason = ESP.getResetReason(); // Returns a String containing the last reset reason in human readable format.
     unsigned int deviceFreeHeap = ESP.getFreeHeap(); // Returns the free heap size.
     byte deviceHeapFragmentation = ESP.getHeapFragmentation(); // Returns the fragmentation metric (0% is clean, more than ~50% is not harmless)
+    bool relayState = digitalRead(RelayPin);
+    ds18b20.requestTemperatures(); // Send the command to get temperatures
+    float deviceTemperature = ds18b20.getTempCByIndex(0);
 
-    publishDeviceData(deviceType, deviceModel, deviceVersion, firmwareFlavor, firmwareVersion, deviceMAC, deviceIP, signalQuality, deviceUptime, deviceResetReason, deviceFreeHeap, deviceHeapFragmentation);
+    publishDeviceData(deviceType, deviceModel, deviceVersion, firmwareFlavor, firmwareVersion, deviceMAC, deviceIP, signalQuality, deviceUptime, deviceResetReason, deviceFreeHeap, deviceHeapFragmentation, relayState, deviceTemperature);
   }
 }
 
@@ -499,13 +529,49 @@ void messageReceived(char* topic, byte* payload, unsigned int length)
   
   // Fetch values.
   // Command: Reset Accumulated Energy Counter.
-  if(jsonReceivedCommand["value"].as<String>() == "ResetEnergy")
+  if(jsonReceivedCommand["value"].as<String>() == "ResetEnergy1")
   {
     if (debug == true)
     {
-      Serial.println(F("Accumulated Energy Counter is going to be Reset"));
+      Serial.println(F("Accumulated Energy Counter 1 is going to be Reset"));
     }
     pzem1.resetEnergy();
+  }
+  if(jsonReceivedCommand["value"].as<String>() == "ResetEnergy2")
+  {
+    if (debug == true)
+    {
+      Serial.println(F("Accumulated Energy Counter 2 is going to be Reset"));
+    }
+    pzem2.resetEnergy();
+  }
+  if(jsonReceivedCommand["value"].as<String>() == "ResetEnergy3")
+  {
+    if (debug == true)
+    {
+      Serial.println(F("Accumulated Energy Counter 3 is going to be Reset"));
+    }
+    pzem3.resetEnergy();
+  }
+
+  // Command: Activate Relay.
+  if(jsonReceivedCommand["value"].as<String>() == "RelayON")
+  {
+    if (debug == true)
+    {
+      Serial.println(F("Relay is going to be activated"));
+    }
+    digitalWrite(RelayPin, true);
+  }
+  
+  // Command: De-Activate Relay.
+  if(jsonReceivedCommand["value"].as<String>() == "RelayOFF")
+  {
+    if (debug == true)
+    {
+      Serial.println(F("Relay is going to be de-activated"));
+    }
+    digitalWrite(RelayPin, false);
   }
 
   // Command: Restart Device.
@@ -611,7 +677,7 @@ void publishSensorsData3(float voltage1, float current1, float power1, float ene
 }
 
 // function called to publish Device information (Type, Model, Version, Firmware Flavor, Firmware version, MAC, IP, WiFi Signal Quality, Uptime, etc.).
-void publishDeviceData(String dev_t, String dev_m, String dev_v, String fw_f, String fw_v, String mac, String ip, byte s_qty, unsigned long up, String rst_r, unsigned int free_heap, byte heap_frg)
+void publishDeviceData(String dev_t, String dev_m, String dev_v, String fw_f, String fw_v, String mac, String ip, byte s_qty, unsigned long up, String rst_r, unsigned int free_heap, byte heap_frg, bool relayState, float t)
 {
   StaticJsonDocument<512> jsonDeviceData;
   jsonDeviceData["msg_type"] = "dev";
@@ -629,6 +695,8 @@ void publishDeviceData(String dev_t, String dev_m, String dev_v, String fw_f, St
   jsonDeviceData["rst_r"] = rst_r;
   jsonDeviceData["free_heap"] = free_heap;
   jsonDeviceData["heap_frg"] = heap_frg;
+  jsonDeviceData["relay"] = relayState;
+  jsonDeviceData["t"] = t;
   jsonDeviceData["debug"] = debug;
 
   char buffer[512];
