@@ -24,7 +24,7 @@
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
 
- =================== 
+  ================== 
   = PZEM-004T V3.0 =
   ==================
   PZEM-004T V3.0 module measures AC voltage, current, active power, frequency,
@@ -36,9 +36,10 @@
   - TX -> RX (NodeMCU depends on PZEM #)
   - VCC -> 5V
 
-  ============================================== 
-  = Sensor DS18B20. Digital Temperature Sensor =
-  ==============================================
+  ==================
+  = Sensor DS18B20 =
+  ==================
+  Digital Temperature Sensor.
   connections:
   - VCC -> 3V3
   - GND -> GND
